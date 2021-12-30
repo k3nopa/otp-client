@@ -19,7 +19,6 @@ def main():
     server = "127.0.0.1"
     port = 1883
     otp = True
-    key = "secretkey"
 
     try:
         # Start the proxy.

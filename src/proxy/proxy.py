@@ -1,17 +1,15 @@
 from threading import Thread
 import socket
-import select
 import binascii
-
-import onetimepad
-import parser
-import ecdh
-import otp
-
+import traceback
 import os
 
+import onetimepad
+import ecdh
+import otp
 import helpers
-LAYER = 10
+
+LAYER = 30
 HEIGHT = 7
 
 
@@ -26,12 +24,12 @@ class Proxy(Thread):
         self.select = helpers.Select()
         self.otp = otp
         self.key = ""
-        # TODO: hold every IoT's past connection's OTP information.
-        # TODO: Store Address(key) to OTP class (value).
-        self.tree = {}
 
+        # NOTE: hold every IoT's past connection's OTP information.
+        self.tree = {}
         # Hold current active connections.
         self.connection = {}
+        self.in_session = False
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -56,90 +54,90 @@ class Proxy(Thread):
                 break
 
             for fd in self.select.loop():
-                # If a socket is open.
-                # If selected socket is server.
+                # If selected socket is open & is a server.
                 if fd == self.socket.fileno():
 
                     client_s, client_addr = self.socket.accept()
-                    clientFd = client_s.fileno()
-
                     server_s = socket.socket(
                         socket.AF_INET, socket.SOCK_STREAM)
                     server_s.connect((self.client, self.port))
+
+                    clientFd = client_s.fileno()
                     serverFd = server_s.fileno()
 
                     self.select.addConnection(client_s)
-                    self.connection[clientFd] = (client_s, serverFd)
-
                     self.select.addConnection(server_s)
+
+                    self.connection[clientFd] = (client_s, serverFd)
                     self.connection[serverFd] = (server_s, clientFd)
 
                     print(f"Connection from {client_addr}")
 
-                # If a socket is already connected.
                 else:
+                    # If a socket is already connected.
                     if fd in self.connection:
                         readSock, writeFd = self.connection[fd]
                     else:
                         continue
 
-                    # If a sending to socket is already connected.
                     if writeFd in self.connection:
+                        # If a sending to socket is already connected.
                         writeSock, _ = self.connection[writeFd]
                     else:
                         continue
 
                     # Decrypt (Receive Data).
                     if self.otp:
-
                         if readSock.fileno() > writeFd:
                             # Packet from Broker
                             data = readSock.recv(1024)
                         else:
                             # Packet from Client
                             try:
-                                ip_addr, _ = readSock.getpeername()
+                                ip_addr = readSock.getpeername()[0]
                                 if self.tree.get(ip_addr) == None:
                                     print("Starting Diffie-Hellman Exhange")
+
                                     ec = ecdh.ECDH(readSock)
-                                    # 1. Recv A
                                     peer_pub = ec.recv_pub_key()
-                                    # 2. Send B
                                     ec.send_pub_key(ec.export_key())
-                                    # 3. Generate Shared Key
                                     peer_pub_key = ec.import_key(peer_pub)
                                     self.key = ec.shared_key(peer_pub_key)
-                                    print("Share Key: ", self.key)
 
-                                    # NOTE: Data already encrypted.
                                     print("Receiving OTP Tree.")
-                                    tree = otp.fetch_tree(
+                                    data = otp.fetch_tree(
                                         sock=readSock, dec_key=self.key.hex(), layer=LAYER
                                     )
-                                    self.tree[ip_addr] = tree
+                                    self.tree[ip_addr] = data
                                     print("Finished receiving OTP Tree.")
-                                    data = b''
+
                                 else:
-                                    print("Trying to fetch path.")
+                                    if not self.in_session:
+                                        # Fetch new path.
+                                        print("Fetch path.")
+                                        path, layer = otp.fetch_path(readSock)
+                                        print(f"Path: {path}, Layer: {layer}")
+                                        self.in_session = True
 
-                                    path, layer = otp.fetch_path(readSock)
-                                    print(f"Path: {path}, Layer: {layer}")
+                                        otp_key = otp.fetch_key(
+                                            tree=self.tree[ip_addr], path=int(path), layer=layer, height=HEIGHT
+                                        )
 
-                                    otp_key = otp.fetch_key(
-                                        tree=self.tree[ip_addr], path=int(path), layer=layer, height=HEIGHT
-                                    )
+                                        self.key = str(otp_key)
+                                        # print("Key: ", self.key)
 
-                                    print("Key: ", otp_key)
-                                    print("MQTT Handling")
-
-                                    # MQTT Packet Handling
                                     data = readSock.recv(1024)
-                                    data = onetimepad.decrypt(
+                                    dec_data = onetimepad.decrypt(
                                         data.hex(), self.key)
-                                    data = binascii.unhexlify(data)
+                                    try:
+                                        data = binascii.unhexlify(dec_data)
+                                        # print("[RECV] ", data)
+                                    except Exception as e:
+                                        print("Unhexlify Error ", dec_data)
 
                             except Exception as e:
-                                print("Client Decryption problem ", e)
+                                print("Client Decryption problem ",
+                                      traceback.format_exc())
                                 os.sys.exit()
                     else:
                         data = readSock.recv(1024)
@@ -153,35 +151,41 @@ class Proxy(Thread):
                         del self.connection[writeFd]
                         self.select.removeConnection(writeSock)
                         writeSock.close()
+                        self.in_session = False
 
                         print(f"Disconnected - ({fd}) <-> ({writeFd}).")
-                        continue
-                    # TODO: Fixed parser to able to use for non otp connections.
-                    # packet_type, content = parser.parser(data)
-                    # print(f"[{packet_type}] {content}")
 
                     # Encrypt (Send Data).
-                    if self.otp and self.tree.get(ip_addr) != None:
+                    if self.otp:
                         # If packet came from client, send to server without encrypting it.
                         if readSock.fileno() < writeFd:
-                            writeSock.sendall(data)
+                            if writeSock.fileno() > 0 and type(data) == bytes:
+                                # print("[SEND BROKER] ", data)
+                                writeSock.sendall(data)
                         else:
-                            # Send first byte fixed header
-                            byte_data = onetimepad.encrypt(
-                                data[:1].hex(), self.key)
-                            writeSock.sendall(binascii.unhexlify(byte_data))
 
-                            # Send second byte fixed header
-                            byte_data = onetimepad.encrypt(
-                                data[1:2].hex(), self.key)
-                            writeSock.sendall(binascii.unhexlify(byte_data))
+                            if writeSock.fileno() > 0 and type(data) == bytes:
+                                # print("[SEND CLIENT] ", data)
+                                # Send first byte fixed header
+                                byte_data = onetimepad.encrypt(
+                                    data[:1].hex(), self.key)
+                                writeSock.sendall(
+                                    binascii.unhexlify(byte_data))
 
-                            # Send remaining
-                            byte_data = onetimepad.encrypt(
-                                data[2:].hex(), self.key)
-                            writeSock.sendall(binascii.unhexlify(byte_data))
+                                # Send second byte fixed header
+                                byte_data = onetimepad.encrypt(
+                                    data[1:2].hex(), self.key)
+                                writeSock.sendall(
+                                    binascii.unhexlify(byte_data))
+
+                                # Send remaining
+                                byte_data = onetimepad.encrypt(
+                                    data[2:].hex(), self.key)
+                                writeSock.sendall(
+                                    binascii.unhexlify(byte_data))
                     else:
-                        writeSock.sendall(data)
+                        if writeSock.fileno() > 0 and type(data) == bytes:
+                            writeSock.sendall(data)
 
         # Clean up all connections.
         for connection in self.connection:

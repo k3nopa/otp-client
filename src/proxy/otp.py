@@ -63,19 +63,17 @@ def fetch_path(sock: socket.SocketIO):
             # Size was sent without any encryption.
             size = sock.recv(10)
             status = Status.R_DATA
-            print("Reading size of ", size)
 
         if status == Status.R_DATA:
             size = int(size)
             while size > 0:
-                read_byte = sock.recv(100)
+                read_byte = sock.recv(size)
                 size -= len(read_byte)
                 packet += read_byte.decode()
 
             status = Status.COMPLETE
 
         if status == Status.COMPLETE:
-            print("Parsing complete packet ", packet)
             data.append(int(packet))
             count += 1
             packet = ""
@@ -90,7 +88,6 @@ def fetch_key(tree, path: int, layer: int, height: int) -> str:
     From given tree array containing only the keys, first we generate the necessary decision tree from given layer.
     Then, we traverse generated OTP decision tree using the given path to obtain the key.
     """
-
     # 1. Generate the necessary tree.
     decision_tree = []
     # 1-1. Generate all switches nodes.
@@ -109,11 +106,26 @@ def fetch_key(tree, path: int, layer: int, height: int) -> str:
 
     # 1-3. Build the tree.
     root = build(decision_tree)
+    graph = root.graphviz()
+    with open("graphiz.txt", "w") as f:
+        graph = str(graph)
+        f.write(graph)
+        f.write(f"Tree: {tree}\n")
+        f.write(f"Path: {path}\n")
+        f.write(f"Layer: {layer}\n")
+        f.write(f"Height: {height}\n")
 
     # 2. Traverse the tree using the path:int.
     path_bin = bin(path)[2:]
     # Make sure len of path is appropriate.
-    path_bin = path_bin[(len(path_bin) - height):]
+    path_len = len(path_bin) - height
+    if path_len < 0:
+        # Meaning path's len is not to the length of tree.
+        padding = '0' * abs(path_len)
+        path_bin = padding + path_bin
+        path_len = 0
+
+    path_bin = path_bin[path_len:]
     key = __get_key(path_bin, root)
     return key
 
@@ -128,3 +140,5 @@ def __get_key(path_bin: str, node: Node) -> int:
             return __get_key(path_bin[1:], node.left)
         else:
             return __get_key(path_bin[1:], node.right)
+
+    return
