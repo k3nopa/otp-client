@@ -1,7 +1,6 @@
 import signal
 import socket
 import threading
-
 import proxy
 
 shutdownEvent = threading.Event()
@@ -15,14 +14,18 @@ def exit_handler(signal, frame):
 def main():
 
     signal.signal(signal.SIGINT, exit_handler)
-    client = "0.0.0.0"
-    server = "127.0.0.1"
+    client = "0.0.0.0"  # MQTT Client Address
+    server = "127.0.0.1"  # MQTT Broker Address
     port = 1883
     otp = True
+    otp_layer = 128
+    otp_height = 7
 
     try:
-        # Start the proxy.
-        proxy_handler = proxy.Proxy(client, server, port, shutdownEvent, otp)
+        proxy_handler = proxy.Proxy(
+            client, server, port, shutdownEvent, otp, otp_layer, otp_height
+        )
+        proxy_handler.daemon = True
         proxy_handler.start()
 
         print(

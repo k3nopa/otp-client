@@ -3,18 +3,13 @@ import socket
 import binascii
 import traceback
 import os
-
 import onetimepad
-import ecdh
 import otp
 import helpers
 
-LAYER = 30
-HEIGHT = 7
-
 
 class Proxy(Thread):
-    def __init__(self, client, server, port, stopEvent, otp=False):
+    def __init__(self, client, server, port, stopEvent, otp=False, layer=128, height=7):
         Thread.__init__(self)
 
         self.client = client
@@ -24,11 +19,12 @@ class Proxy(Thread):
         self.select = helpers.Select()
         self.otp = otp
         self.key = ""
+        self.layer = layer
+        self.height = height
 
-        # NOTE: hold every IoT's past connection's OTP information.
-        self.tree = {}
-        # Hold current active connections.
-        self.connection = {}
+        self.tree = {}  # hold every IoT's past connection's OTP information.
+        self.session_count = 0
+        self.connection = {}    # Hold current active connections.
         self.in_session = False
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -37,7 +33,6 @@ class Proxy(Thread):
         try:
             self.socket.bind((self.client, port))
             self.socket.listen(5)
-
             self.select.addConnection(self.socket)
 
         except socket.gaierror as e:
@@ -71,7 +66,7 @@ class Proxy(Thread):
                     self.connection[clientFd] = (client_s, serverFd)
                     self.connection[serverFd] = (server_s, clientFd)
 
-                    print(f"Connection from {client_addr}")
+                    helpers.logger("info", f"Connection from {client_addr}")
 
                 else:
                     # If a socket is already connected.
@@ -86,64 +81,60 @@ class Proxy(Thread):
                     else:
                         continue
 
-                    # Decrypt (Receive Data).
-                    if self.otp:
+                    if self.otp:    # Decrypt (Receive Data).
                         if readSock.fileno() > writeFd:
-                            # Packet from Broker
-                            data = readSock.recv(1024)
+                            data = readSock.recv(1024)  # Packet from Broker
                         else:
-                            # Packet from Client
                             try:
                                 ip_addr = readSock.getpeername()[0]
                                 if self.tree.get(ip_addr) == None:
-                                    print("Starting Diffie-Hellman Exhange")
+                                    helpers.logger("info", "Starting Diffie-Hellman Exhange")
 
-                                    ec = ecdh.ECDH(readSock)
-                                    peer_pub = ec.recv_pub_key()
-                                    ec.send_pub_key(ec.export_key())
-                                    peer_pub_key = ec.import_key(peer_pub)
-                                    self.key = ec.shared_key(peer_pub_key)
+                                    ecdh_key = helpers.init_diffie_hellman(readSock)
 
-                                    print("Receiving OTP Tree.")
+                                    helpers.logger("info", f"ECDH Key = {ecdh_key}")
+                                    helpers.logger("info", "Fetching OTP Tree.")
+
                                     data = otp.fetch_tree(
-                                        sock=readSock, dec_key=self.key.hex(), layer=LAYER
+                                        sock=readSock,
+                                        dec_key=self.key.hex(),
+                                        layer=self.layer,
                                     )
                                     self.tree[ip_addr] = data
-                                    print("Finished receiving OTP Tree.")
+
+                                    helpers.logger("info", "Done fetching OTP Tree.")
 
                                 else:
                                     if not self.in_session:
-                                        # Fetch new path.
-                                        print("Fetch path.")
+                                        helpers.logger("info", "Creating New Session.")
                                         path, layer = otp.fetch_path(readSock)
-                                        print(f"Path: {path}, Layer: {layer}")
-                                        self.in_session = True
 
                                         otp_key = otp.fetch_key(
-                                            tree=self.tree[ip_addr], path=int(path), layer=layer, height=HEIGHT
+                                            tree=self.tree[ip_addr],
+                                            path=int(path),
+                                            layer=layer,
+                                            height=self.height,
                                         )
 
                                         self.key = str(otp_key)
-                                        # print("Key: ", self.key)
+                                        self.in_session = True
+                                        self.session_count += 1
 
                                     data = readSock.recv(1024)
-                                    dec_data = onetimepad.decrypt(
-                                        data.hex(), self.key)
+                                    dec_data = onetimepad.decrypt(data.hex(), self.key)
                                     try:
                                         data = binascii.unhexlify(dec_data)
-                                        # print("[RECV] ", data)
-                                    except Exception as e:
-                                        print("Unhexlify Error ", dec_data)
+                                        helpers.logger(f"H: {self.height}, L: {self.layer}", f"Session {self.session_count} => Key: {self.key}, Len Data Recv: {len(data)}", "info")
+                                    except Exception:
+                                        helpers.logger(f"H: {self.height}, L: {self.layer}", f"Session {self.session_count} => Key: {self.key}, Decoding Error.", "warn")
 
                             except Exception as e:
-                                print("Client Decryption problem ",
-                                      traceback.format_exc())
+                                helpers.logger("error", f"Client Decryption Error\n{e}")
                                 os.sys.exit()
                     else:
                         data = readSock.recv(1024)
 
                     if not data:
-                        # If no longer receiving data close socket.
                         del self.connection[fd]
                         self.select.removeConnection(readSock)
                         readSock.close()
@@ -153,39 +144,17 @@ class Proxy(Thread):
                         writeSock.close()
                         self.in_session = False
 
-                        print(f"Disconnected - ({fd}) <-> ({writeFd}).")
-
-                    # Encrypt (Send Data).
-                    if self.otp:
-                        # If packet came from client, send to server without encrypting it.
-                        if readSock.fileno() < writeFd:
-                            if writeSock.fileno() > 0 and type(data) == bytes:
-                                # print("[SEND BROKER] ", data)
-                                writeSock.sendall(data)
-                        else:
-
-                            if writeSock.fileno() > 0 and type(data) == bytes:
-                                # print("[SEND CLIENT] ", data)
-                                # Send first byte fixed header
-                                byte_data = onetimepad.encrypt(
-                                    data[:1].hex(), self.key)
-                                writeSock.sendall(
-                                    binascii.unhexlify(byte_data))
-
-                                # Send second byte fixed header
-                                byte_data = onetimepad.encrypt(
-                                    data[1:2].hex(), self.key)
-                                writeSock.sendall(
-                                    binascii.unhexlify(byte_data))
-
-                                # Send remaining
-                                byte_data = onetimepad.encrypt(
-                                    data[2:].hex(), self.key)
-                                writeSock.sendall(
-                                    binascii.unhexlify(byte_data))
-                    else:
-                        if writeSock.fileno() > 0 and type(data) == bytes:
+                        helpers.logger("info", f"Client Disconnected ({fd}) <-> ({writeFd})")
+                    
+                    if self.otp:   # Encrypt (Send Data). 
+                        # If packet came from client, send to broker without encrypting it.
+                        if readSock.fileno() < writeFd and writeSock.fileno() > 0 and type(data) == bytes:
                             writeSock.sendall(data)
+                        elif writeSock.fileno() > 0 and type(data) == bytes:
+                            helpers.send_mqtt_packet(writeSock, self.key, data)
+
+                    elif writeSock.fileno() > 0 and type(data) == bytes:
+                        writeSock.sendall(data)
 
         # Clean up all connections.
         for connection in self.connection:
