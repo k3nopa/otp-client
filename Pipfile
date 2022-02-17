@@ -10,9 +10,18 @@ wolfcrypt = "*"
 pyopenssl = "*"
 ipython = "*"
 binarytree = "*"
+openpyxl = "*"
+gspread = "*"
+seaborn = "*"
+pandas = "*"
+numpy = "*"
+matplotlib = "*"
+sklearn = "*"
+texttable = "*"
+paramiko = "*"
+maturin = "*"
 
 [dev-packages]
-autopep8 = "*"
 black = "*"
 
 [requires]
