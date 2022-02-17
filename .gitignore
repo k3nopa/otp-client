@@ -1,7 +1,6 @@
 backup/
 **/*.xlsx
 **/.DS_Store
-mqtt/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
