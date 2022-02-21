@@ -1,0 +1,14 @@
+[package]
+name = "otp_conn"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "otp_conn"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.15.1", features = ["extension-module"] }
+serialport = "4.0.1"
+byteorder = "1.4.3"
