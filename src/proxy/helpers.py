@@ -1,6 +1,6 @@
 import select
 from socket import SocketIO
-import ecdh
+import mqtt.ecdh as ecdh
 import onetimepad
 import binascii
 
